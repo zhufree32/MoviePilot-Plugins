@@ -1357,6 +1357,7 @@ class RemoveLink(_PluginBase):
     def _get_storage_path_from_strm(self, strm_file_path: Path) -> Tuple[str, str]:
         """
         根据 strm 文件路径获取对应的网盘存储路径
+        修复点：确保提取完整的strm主名（仅去掉.strm后缀，保留所有其他字符）
         返回 (storage_type, storage_path) 或 (None, None)
         """
         mappings = self._parse_strm_path_mappings()
@@ -1364,13 +1365,16 @@ class RemoveLink(_PluginBase):
 
         for strm_prefix, (storage_type, storage_prefix) in mappings.items():
             if strm_path_str.startswith(strm_prefix):
-                # 计算相对路径
+                # 计算相对路径（保留完整文件名，仅后续去掉.strm后缀）
                 relative_path = strm_path_str[len(strm_prefix) :].lstrip("/")
-                # 构建网盘路径，去掉 .strm 后缀
-                storage_file_path = storage_prefix.rstrip("/") + "/" + relative_path
-                if storage_file_path.endswith(".strm"):
-                    storage_file_path = storage_file_path[:-5]  # 去掉 .strm 后缀
-
+                # 构建网盘路径：仅去掉.strm后缀，保留所有其他字符
+                storage_file_path = f"{storage_prefix.rstrip('/')}/{relative_path}"
+                
+                # 安全去掉.strm后缀（避免多次截断）
+                if storage_file_path.lower().endswith(".strm"):
+                    storage_file_path = storage_file_path[:-5]  # .strm 是5个字符（含.）
+                
+                logger.debug(f"STRM文件 {strm_file_path} 映射到网盘路径: [{storage_type}] {storage_file_path}")
                 return storage_type, storage_file_path
 
         return None, None
@@ -1379,10 +1383,20 @@ class RemoveLink(_PluginBase):
         self, storage_type: str, base_path: str
     ) -> schemas.FileItem:
         """
-        在网盘中查找以指定路径为前缀的视频文件
+        在网盘中查找与strm文件精准匹配的视频文件
+        修复点：
+        1. 明确视频后缀列表，避免匹配非视频文件
+        2. 精准匹配逻辑：视频文件去掉最后一个后缀（视频后缀）后，需完全等于或以strm主名+分隔符开头
+        3. 避免因文件名含.、空格导致的误匹配
         """
         from app.core.config import settings
 
+        # 明确视频后缀列表（覆盖主流视频格式）
+        VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
+        
+        # 获取strm文件的完整主名（仅去掉.strm后缀，保留所有字符）
+        strm_base_name = Path(base_path).name
+        
         # 获取父目录
         parent_path = str(Path(base_path).parent)
         parent_item = schemas.FileItem(
@@ -1402,22 +1416,38 @@ class RemoveLink(_PluginBase):
             logger.debug(f"父目录为空: [{storage_type}] {parent_path}")
             return None
 
-        # 查找以 base_path 为前缀的视频文件
-        base_name = Path(base_path).name
+        # 精准查找匹配的视频文件
+        matched_file = None
         for file_item in files:
-            if file_item.type == "file" and file_item.name.startswith(base_name):
-                # 检查是否为视频文件
-                if (
-                    file_item.extension
-                    and f".{file_item.extension.lower()}" in settings.RMT_MEDIAEXT
-                ):
-                    logger.info(
-                        f"找到匹配的视频文件: [{storage_type}] {file_item.path}"
-                    )
-                    return file_item
-
-        logger.debug(f"未找到匹配的视频文件: [{storage_type}] {base_path}")
-        return None
+            if file_item.type != "file":
+                continue
+                
+            # 转换文件名和后缀为小写，避免大小写问题
+            file_name = file_item.name.lower()
+            file_ext = Path(file_item.name).suffix.lower()
+            
+            # 1. 检查是否为视频文件
+            if file_ext not in VIDEO_EXTENSIONS:
+                continue
+            
+            # 2. 提取视频文件的基础名（去掉最后一个视频后缀）
+            video_base_name = Path(file_item.name).stem
+            
+            # 3. 精准匹配逻辑：
+            #    - 场景1：视频基础名与strm主名完全一致（如 strm: test.strm → 视频: test.mkv）
+            #    - 场景2：视频基础名以strm主名+分隔符开头（如 strm: test-1080p.strm → 视频: test-1080p.bluray.mkv）
+            if (video_base_name == strm_base_name) or (
+                video_base_name.startswith(f"{strm_base_name}.") 
+                or video_base_name.startswith(f"{strm_base_name} - ")
+                or video_base_name.startswith(f"{strm_base_name}_")
+            ):
+                logger.info(f"找到匹配的视频文件: [{storage_type}] {file_item.path}")
+                matched_file = file_item
+                break  # 只匹配第一个精准命中的文件，避免多匹配
+        
+        if not matched_file:
+            logger.debug(f"未找到精准匹配的视频文件: [{storage_type}] {base_path}")
+        return matched_file
 
     def _delete_storage_scrap_files(
         self, storage_type: str, storage_file_item: schemas.FileItem
@@ -1654,10 +1684,16 @@ class RemoveLink(_PluginBase):
     def handle_strm_deleted(self, strm_file_path: Path):
         """
         处理 strm 文件删除事件
+        增强点：增加日志和异常捕获，确保仅删除精准匹配的文件
         """
         logger.info(f"处理 strm 文件删除: {strm_file_path}")
 
         try:
+            # 校验strm文件后缀（双重保障）
+            if strm_file_path.suffix.lower() != ".strm":
+                logger.warning(f"非STRM文件，跳过处理: {strm_file_path}")
+                return
+
             # 获取对应的网盘文件路径
             storage_type, storage_path = self._get_storage_path_from_strm(
                 strm_file_path
@@ -1669,14 +1705,14 @@ class RemoveLink(_PluginBase):
                 )
                 return
 
-            # 查找网盘中的视频文件
+            # 查找网盘中的视频文件（使用修复后的精准匹配逻辑）
             storage_file_item = self._find_storage_media_file(
                 storage_type, storage_path
             )
 
             if not storage_file_item:
                 logger.info(
-                    f"网盘中未找到对应的视频文件: [{storage_type}] {storage_path}"
+                    f"网盘中未找到精准匹配的视频文件: [{storage_type}] {storage_path}"
                 )
                 return
 
@@ -1688,25 +1724,22 @@ class RemoveLink(_PluginBase):
                     f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
                 )
 
-                # 清理本地 strm 目录的刮削文件
+                # 后续刮削文件、空目录清理逻辑保持不变（原逻辑正确）
                 local_scrap_deleted = 0
                 if self._delete_scrap_infos:
                     self.delete_scrap_infos(strm_file_path)
-                    local_scrap_deleted = 1  # 简化计数，实际可能删除多个
+                    local_scrap_deleted = 1
 
-                # 清理网盘上的刮削文件
                 storage_scrap_deleted = 0
                 storage_dirs_deleted = 0
                 if self._delete_scrap_infos:
                     storage_scrap_deleted = self._delete_storage_scrap_files(
                         storage_type, storage_file_item
                     )
-                    # 清理网盘空目录
                     storage_dirs_deleted = self._delete_storage_empty_folders(
                         storage_type, storage_file_item
                     )
 
-                # 删除转移记录（通过网盘文件路径查询）
                 history_deleted = False
                 if self._delete_history:
                     history_deleted = self.delete_history_by_dest(
@@ -1715,13 +1748,11 @@ class RemoveLink(_PluginBase):
 
                 # 发送通知
                 if self._notify:
-                    # 构建通知内容
                     notification_parts = [f"🗂️ STRM 文件：{strm_file_path}"]
                     notification_parts.append(
                         f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
                     )
 
-                    # 添加其他操作记录
                     if self._delete_history:
                         if history_deleted:
                             notification_parts.append("📝 已清理转移记录")
@@ -1739,7 +1770,6 @@ class RemoveLink(_PluginBase):
                         else:
                             scrap_msg = "🖼️ 无刮削文件需要清理"
 
-                        # 添加空目录清理信息
                         if storage_dirs_deleted > 0:
                             scrap_msg += f"，清理空目录 {storage_dirs_deleted} 个"
 
