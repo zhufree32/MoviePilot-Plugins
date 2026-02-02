@@ -62,11 +62,11 @@ class FileMonitorHandler(FileSystemEventHandler):
 class RemoveLink(_PluginBase):
     # 插件基础信息
     plugin_name = "STRM文件清理"
-    plugin_desc = "仅监控STRM文件删除，同步删除目标目录同名视频文件"
+    plugin_desc = "监控STRM文件删除，同步删除目标目录同名视频+字幕文件（.srt/.ass）"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     plugin_author = "DzAvril（精简版）"
-    author_url = "https://github.com/DzAvril"
+    author_url = "https://github.com/zhufree32"
     plugin_config_prefix = "linkdeleted_"
     plugin_order = 0
     auth_level = 1
@@ -80,8 +80,9 @@ class RemoveLink(_PluginBase):
     _storagechain = None
     _observer = []
 
-    # 视频后缀白名单（精准匹配用）
+    # 后缀白名单（精准匹配用）
     VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
+    SUBTITLE_EXTENSIONS = [".srt", ".ass"]  # 新增字幕后缀
 
     @staticmethod
     def __choose_observer():
@@ -102,7 +103,7 @@ class RemoveLink(_PluginBase):
         return PollingObserver()
 
     def init_plugin(self, config: dict = None):
-        logger.info(f"初始化STRM文件清理插件")
+        logger.info(f"初始化STRM文件清理插件（含字幕清理）")
         self._storagechain = StorageChain()
 
         if config:
@@ -179,8 +180,8 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "title": "🧹 STRM文件清理插件（精简版）",
-                                            "text": "仅监控STRM文件删除，同步删除目标目录中「文件名完全一致」的视频文件（支持MKV/MP4/TS/M2TS等格式）。",
+                                            "title": "🧹 STRM文件清理插件（含字幕清理）",
+                                            "text": "监控STRM文件删除，同步删除目标目录中「文件名完全一致」的视频文件（MKV/MP4等）和字幕文件（.srt/.ass）。",
                                         },
                                     }
                                 ],
@@ -292,7 +293,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "text": "支持的视频格式：MKV、MP4、TS、M2TS、AVI、MOV、FLV、WMV、MPEG、MPG；仅删除「文件名（去后缀）与STRM文件名（去.strm）完全一致」的视频文件。",
+                                            "text": "支持的视频格式：MKV、MP4、TS、M2TS、AVI、MOV、FLV、WMV、MPEG、MPG；支持的字幕格式：SRT、ASS；仅删除「文件名（去后缀）与STRM文件名（去.strm）完全一致」的文件。",
                                         },
                                     }
                                 ],
@@ -365,11 +366,17 @@ class RemoveLink(_PluginBase):
                 return storage_type, storage_file_path
         return None, None
 
-    def _find_storage_media_file(self, storage_type: str, base_path: str) -> schemas.FileItem:
-        """精准查找与STRM主名完全匹配的视频文件"""
+    def _find_matched_files(self, storage_type: str, base_path: str, target_extensions: list) -> List[schemas.FileItem]:
+        """
+        通用方法：查找与STRM主名完全匹配的指定后缀文件
+        :param storage_type: 存储类型
+        :param base_path: STRM映射后的基础路径
+        :param target_extensions: 目标后缀列表（如[.mkv, .mp4]）
+        :return: 匹配的文件列表
+        """
         # 获取STRM主名（仅去.strm后缀）
         strm_base_name = Path(base_path).name
-        logger.debug(f"待匹配STRM主名：{strm_base_name}")
+        logger.debug(f"待匹配STRM主名：{strm_base_name}，目标后缀：{target_extensions}")
         
         # 获取目标目录
         parent_path = str(Path(base_path).parent)
@@ -380,60 +387,80 @@ class RemoveLink(_PluginBase):
         )
         if not self._storagechain.exists(parent_item):
             logger.debug(f"目标目录不存在：[{storage_type}] {parent_path}")
-            return None
+            return []
 
-        # 遍历目录找完全匹配的视频文件
+        # 遍历目录找完全匹配的文件
         files = self._storagechain.list_files(parent_item, recursion=False)
         if not files:
             logger.debug(f"目标目录为空：[{storage_type}] {parent_path}")
-            return None
+            return []
 
-        matched_file = None
+        matched_files = []
         for file_item in files:
             if file_item.type != "file":
                 continue
-            # 提取视频文件基础名（去后缀）和后缀
-            video_base_name = Path(file_item.name).stem
-            file_ext = Path(file_item.name).suffix.lower()
-            logger.debug(f"对比：视频基础名={video_base_name} | STRM主名={strm_base_name} | 后缀={file_ext}")
+            # 提取文件基础名（去后缀）和后缀（转小写）
+            file_name = file_item.name
+            file_base_name = Path(file_name).stem
+            file_ext = Path(file_name).suffix.lower()
             
-            # 仅匹配：视频后缀在白名单 + 基础名与STRM主名完全一致
-            if file_ext in self.VIDEO_EXTENSIONS and video_base_name == strm_base_name:
-                logger.info(f"找到完全匹配的视频文件：[{storage_type}] {file_item.path}")
-                matched_file = file_item
-                break
-        if not matched_file:
-            logger.info(f"未找到与「{strm_base_name}」完全匹配的视频文件")
-        return matched_file
+            logger.debug(f"对比：文件基础名={file_base_name} | STRM主名={strm_base_name} | 后缀={file_ext}")
+            
+            # 完全匹配：基础名一致 + 后缀在目标列表中
+            if file_base_name == strm_base_name and file_ext in target_extensions:
+                logger.info(f"找到完全匹配的文件：[{storage_type}] {file_item.path}")
+                matched_files.append(file_item)
+        
+        if not matched_files:
+            logger.info(f"未找到与「{strm_base_name}」完全匹配的{target_extensions}文件")
+        return matched_files
+
+    def _delete_file_item(self, storage_type: str, file_item: schemas.FileItem) -> bool:
+        """删除单个文件，返回是否删除成功"""
+        try:
+            logger.info(f"准备删除文件：[{storage_type}] {file_item.path}")
+            if self._storagechain.delete_file(file_item):
+                logger.info(f"成功删除文件：[{storage_type}] {file_item.path}")
+                return True
+            else:
+                logger.error(f"删除文件失败：[{storage_type}] {file_item.path}")
+                return False
+        except Exception as e:
+            logger.error(f"删除文件异常：[{storage_type}] {file_item.path} - {str(e)}")
+            return False
 
     def handle_strm_deleted(self, strm_file_path: Path):
-        """处理STRM文件删除（核心逻辑）"""
+        """处理STRM文件删除（核心逻辑：删视频+删字幕）"""
         logger.info(f"处理STRM文件删除：{strm_file_path}")
+        deleted_files = []  # 记录删除成功的文件
         try:
-            # 获取目标存储路径
+            # 1. 获取目标存储路径
             storage_type, storage_path = self._get_storage_path_from_strm(strm_file_path)
             if not storage_type or not storage_path:
                 logger.warning(f"未找到STRM文件 {strm_file_path} 的路径映射")
                 return
 
-            # 查找完全匹配的视频文件
-            storage_file_item = self._find_storage_media_file(storage_type, storage_path)
-            if not storage_file_item:
-                return
+            # 2. 查找并删除同名视频文件（完全匹配）
+            video_files = self._find_matched_files(storage_type, storage_path, self.VIDEO_EXTENSIONS)
+            for video_file in video_files:
+                if self._delete_file_item(storage_type, video_file):
+                    deleted_files.append(f"视频：[{storage_type}] {video_file.path}")
 
-            # 删除目标视频文件
-            logger.info(f"准备删除目标文件：[{storage_type}] {storage_file_item.path}")
-            if self._storagechain.delete_file(storage_file_item):
-                logger.info(f"成功删除目标文件：[{storage_type}] {storage_file_item.path}")
-                # 发送通知（可选）
-                if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="🧹 STRM文件清理",
-                        text=f"✅ 成功删除\nSTRM文件：{strm_file_path}\n目标文件：[{storage_type}] {storage_file_item.path}",
-                    )
-            else:
-                logger.error(f"删除目标文件失败：[{storage_type}] {storage_file_item.path}")
+            # 3. 查找并删除同名字幕文件（.srt/.ass，完全匹配）
+            subtitle_files = self._find_matched_files(storage_type, storage_path, self.SUBTITLE_EXTENSIONS)
+            for subtitle_file in subtitle_files:
+                if self._delete_file_item(storage_type, subtitle_file):
+                    deleted_files.append(f"字幕：[{storage_type}] {subtitle_file.path}")
+
+            # 4. 发送通知（如果开启且有删除成功的文件）
+            if self._notify and deleted_files:
+                notification_text = [f"✅ 成功删除以下文件", f"STRM文件：{strm_file_path}"] + deleted_files
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="🧹 STRM文件清理",
+                    text="\n".join(notification_text),
+                )
+
         except Exception as e:
             logger.error(f"处理STRM删除失败：{strm_file_path} - {str(e)} - {traceback.format_exc()}")
 
