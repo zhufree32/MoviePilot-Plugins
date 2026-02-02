@@ -196,9 +196,9 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     # 插件作者
-    plugin_author = "DzAvril"
+    plugin_author = "zhufree32"
     # 作者主页
     author_url = "https://github.com/DzAvril"
     # 插件配置项ID前缀
