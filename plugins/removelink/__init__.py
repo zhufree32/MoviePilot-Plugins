@@ -196,7 +196,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.6"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "zhufree32"
     # 作者主页
@@ -1379,75 +1379,67 @@ class RemoveLink(_PluginBase):
 
         return None, None
 
-    def _find_storage_media_file(
-        self, storage_type: str, base_path: str
-    ) -> schemas.FileItem:
-        """
-        在网盘中查找与strm文件精准匹配的视频文件
-        修复点：
-        1. 明确视频后缀列表，避免匹配非视频文件
-        2. 精准匹配逻辑：视频文件去掉最后一个后缀（视频后缀）后，需完全等于或以strm主名+分隔符开头
-        3. 避免因文件名含.、空格导致的误匹配
-        """
-        from app.core.config import settings
+def _find_storage_media_file(
+    self, storage_type: str, base_path: str
+) -> schemas.FileItem:
+    """
+    在网盘中查找与strm文件100%精准匹配的视频文件
+    修复点：仅匹配「去掉视频后缀后」与strm主名完全一致的文件，彻底杜绝模糊匹配
+    """
+    from app.core.config import settings
 
-        # 明确视频后缀列表（覆盖主流视频格式）
-        VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
-        
-        # 获取strm文件的完整主名（仅去掉.strm后缀，保留所有字符）
-        strm_base_name = Path(base_path).name
-        
-        # 获取父目录
-        parent_path = str(Path(base_path).parent)
-        parent_item = schemas.FileItem(
-            storage=storage_type,
-            path=parent_path if parent_path.endswith("/") else parent_path + "/",
-            type="dir",
-        )
+    # 明确视频后缀列表（覆盖主流视频格式，可根据你的需求增减）
+    VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
+    
+    # 获取strm文件的完整主名（仅去掉.strm后缀，保留所有字符）
+    strm_base_name = Path(base_path).name
+    logger.debug(f"STRM主名（仅去.strm后缀）：{strm_base_name}")
+    
+    # 获取父目录
+    parent_path = str(Path(base_path).parent)
+    parent_item = schemas.FileItem(
+        storage=storage_type,
+        path=parent_path if parent_path.endswith("/") else parent_path + "/",
+        type="dir",
+    )
 
-        # 检查父目录是否存在
-        if not self._storagechain.exists(parent_item):
-            logger.debug(f"父目录不存在: [{storage_type}] {parent_path}")
-            return None
+    # 检查父目录是否存在
+    if not self._storagechain.exists(parent_item):
+        logger.debug(f"父目录不存在: [{storage_type}] {parent_path}")
+        return None
 
-        # 列出父目录中的文件
-        files = self._storagechain.list_files(parent_item, recursion=False)
-        if not files:
-            logger.debug(f"父目录为空: [{storage_type}] {parent_path}")
-            return None
+    # 列出父目录中的文件
+    files = self._storagechain.list_files(parent_item, recursion=False)
+    if not files:
+        logger.debug(f"父目录为空: [{storage_type}] {parent_path}")
+        return None
 
-        # 精准查找匹配的视频文件
-        matched_file = None
-        for file_item in files:
-            if file_item.type != "file":
-                continue
-                
-            # 转换文件名和后缀为小写，避免大小写问题
-            file_name = file_item.name.lower()
-            file_ext = Path(file_item.name).suffix.lower()
+    # 仅保留「完全匹配」的逻辑：视频基础名 = strm主名
+    matched_file = None
+    for file_item in files:
+        if file_item.type != "file":
+            continue
             
-            # 1. 检查是否为视频文件
-            if file_ext not in VIDEO_EXTENSIONS:
-                continue
-            
-            # 2. 提取视频文件的基础名（去掉最后一个视频后缀）
-            video_base_name = Path(file_item.name).stem
-            
-            # 3. 精准匹配逻辑：
-            #    - 场景1：视频基础名与strm主名完全一致（如 strm: test.strm → 视频: test.mkv）
-            #    - 场景2：视频基础名以strm主名+分隔符开头（如 strm: test-1080p.strm → 视频: test-1080p.bluray.mkv）
-            if (video_base_name == strm_base_name) or (
-                video_base_name.startswith(f"{strm_base_name}.") 
-                or video_base_name.startswith(f"{strm_base_name} - ")
-                or video_base_name.startswith(f"{strm_base_name}_")
-            ):
-                logger.info(f"找到匹配的视频文件: [{storage_type}] {file_item.path}")
-                matched_file = file_item
-                break  # 只匹配第一个精准命中的文件，避免多匹配
+        # 提取视频文件的基础名（去掉最后一个视频后缀）和后缀
+        video_base_name = Path(file_item.name).stem
+        file_ext = Path(file_item.name).suffix.lower()
         
-        if not matched_file:
-            logger.debug(f"未找到精准匹配的视频文件: [{storage_type}] {base_path}")
-        return matched_file
+        # 日志输出每个视频文件的匹配对比（方便排查）
+        logger.debug(f"对比：STRM主名={strm_base_name} | 视频基础名={video_base_name} | 视频后缀={file_ext}")
+        
+        # 1. 检查是否为视频文件
+        if file_ext not in VIDEO_EXTENSIONS:
+            continue
+        
+        # 2. 100%精准匹配：视频基础名必须和strm主名完全一致
+        if video_base_name == strm_base_name:
+            logger.info(f"找到100%匹配的视频文件: [{storage_type}] {file_item.path}")
+            matched_file = file_item
+            break  # 找到完全匹配的后立即停止，避免多匹配
+    
+    if not matched_file:
+        logger.info(f"未找到与「{strm_base_name}」完全匹配的视频文件（仅匹配{VIDEO_EXTENSIONS}后缀）")
+    return matched_file
 
     def _delete_storage_scrap_files(
         self, storage_type: str, storage_file_item: schemas.FileItem
