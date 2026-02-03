@@ -21,6 +21,18 @@
             "v1.6": "提升插件性能"
         }
     },
+    "DownloadSiteTag": {
+    "name": "下载任务分类与标签",
+    "description": "自动给下载任务分类与打站点标签、剧集名称标签",
+    "labels": "下载管理",
+    "version": "2.1",
+    "icon": "Youtube-dl_B.png",
+    "author": "叮叮当",
+    "level": 1,
+    "history": {
+      "v2.1": "修复错误的TmdbHelper模块引用"
+    }
+  },
     "QbCommand": {
         "name": "QB远程操作",
         "description": "通过定时任务或交互命令远程操作QB暂停/开始/限速等。",
