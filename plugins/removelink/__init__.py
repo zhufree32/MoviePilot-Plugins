@@ -74,7 +74,7 @@ class RemoveLink(_PluginBase):
     plugin_name = "STRM&字幕文件清理"
     plugin_desc = "监控STRM/字幕文件删除，同步删除目标目录对应文件+空目录（STRM→同名视频，字幕→完全同名文件）"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "2.3"
+    plugin_version = "2.7"
     plugin_author = "zhufree（自用简版）"
     author_url = "https://github.com/DzAvril"
     plugin_config_prefix = "linkdeleted_"
