@@ -72,11 +72,11 @@ class FileMonitorHandler(FileSystemEventHandler):
 class RemoveLink(_PluginBase):
     # 插件基础信息
     plugin_name = "STRM&字幕文件清理"
-    plugin_desc = "监控STRM/字幕文件删除，同步删除目标目录对应文件（STRM→同名视频，字幕→完全同名文件）"
+    plugin_desc = "监控STRM/字幕文件删除，同步删除目标目录对应文件+空目录（STRM→同名视频，字幕→完全同名文件）"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "2.7"
-    plugin_author = "zhuree自用"
-    author_url = "https://github.com/zhufree32"
+    plugin_version = "1.3"
+    plugin_author = "DzAvril（精简版）"
+    author_url = "https://github.com/DzAvril"
     plugin_config_prefix = "linkdeleted_"
     plugin_order = 0
     auth_level = 1
@@ -113,7 +113,7 @@ class RemoveLink(_PluginBase):
         return PollingObserver()
 
     def init_plugin(self, config: dict = None):
-        logger.info(f"初始化STRM&字幕文件清理插件")
+        logger.info(f"初始化STRM&字幕文件清理插件（含空目录清理）")
         self._storagechain = StorageChain()
 
         if config:
@@ -190,8 +190,8 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "title": "🧹 STRM&字幕文件清理插件",
-                                            "text": "1. 监控STRM删除 → 同步删除目标目录「同名（去后缀）」视频文件；2. 监控SRT/ASS删除 → 同步删除目标目录「完全同名（含后缀）」字幕文件。",
+                                            "title": "🧹 STRM&字幕文件清理插件（含空目录清理）",
+                                            "text": "1. 监控STRM删除 → 同步删除目标目录「同名（去后缀）」视频文件；2. 监控SRT/ASS删除 → 同步删除目标目录「完全同名（含后缀）」字幕文件；3. 删除文件后自动清理空目录（逐级向上）。",
                                         },
                                     }
                                 ],
@@ -303,7 +303,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "text": "视频格式：MKV、MP4、TS、M2TS、AVI、MOV、FLV、WMV、MPEG、MPG；字幕格式：SRT、ASS；STRM匹配规则：去后缀同名，字幕匹配规则：完全同名（含后缀）。",
+                                            "text": "视频格式：MKV、MP4、TS、M2TS、AVI、MOV、FLV、WMV、MPEG、MPG；字幕格式：SRT、ASS；STRM匹配规则：去后缀同名，字幕匹配规则：完全同名（含后缀）；删除文件后自动清理空目录。",
                                         },
                                     }
                                 ],
@@ -465,9 +465,62 @@ class RemoveLink(_PluginBase):
             logger.error(f"删除异常：[{storage_type}] {file_item.path} - {str(e)}")
             return False
 
+    def _delete_empty_dirs(self, storage_type: str, file_item: schemas.FileItem) -> List[str]:
+        """
+        逐级删除空目录（从文件所在目录向上）
+        :param storage_type: 存储类型
+        :param file_item: 已删除文件的FileItem
+        :return: 已删除的空目录列表
+        """
+        deleted_dirs = []
+        try:
+            # 获取文件所在目录
+            current_dir_path = str(Path(file_item.path).parent)
+            # 根目录标识（避免无限循环）
+            root_markers = ["/", "\\", ""]
+            
+            while current_dir_path not in root_markers:
+                # 构建目录Item
+                dir_item = schemas.FileItem(
+                    storage=storage_type,
+                    path=current_dir_path if current_dir_path.endswith("/") else current_dir_path + "/",
+                    type="dir",
+                )
+                
+                # 检查目录是否存在
+                if not self._storagechain.exists(dir_item):
+                    logger.debug(f"目录已不存在：[{storage_type}] {current_dir_path}")
+                    # 继续检查上级目录
+                    current_dir_path = str(Path(current_dir_path).parent)
+                    continue
+                
+                # 列出目录内容（仅一级，不递归）
+                dir_contents = self._storagechain.list_files(dir_item, recursion=False)
+                if not dir_contents:
+                    # 目录为空，删除
+                    logger.info(f"准备删除空目录：[{storage_type}] {current_dir_path}")
+                    if self._storagechain.delete_file(dir_item):
+                        logger.info(f"成功删除空目录：[{storage_type}] {current_dir_path}")
+                        deleted_dirs.append(f"空目录：[{storage_type}] {current_dir_path}")
+                        # 继续检查上级目录
+                        current_dir_path = str(Path(current_dir_path).parent)
+                    else:
+                        logger.error(f"删除空目录失败：[{storage_type}] {current_dir_path}")
+                        break
+                else:
+                    # 目录非空，停止检查
+                    logger.debug(f"目录非空，停止清理：[{storage_type}] {current_dir_path}")
+                    break
+            
+        except Exception as e:
+            logger.error(f"清理空目录异常：{str(e)}")
+        
+        return deleted_dirs
+
     def handle_strm_deleted(self, strm_file_path: Path):
-        """处理STRM文件删除：删同名视频（去后缀匹配）"""
+        """处理STRM文件删除：删同名视频 + 空目录"""
         deleted_files = []
+        deleted_dirs = []
         try:
             # 获取目标路径（去掉.strm后缀）
             storage_type, target_path = self._get_target_path(strm_file_path, keep_suffix=False)
@@ -480,20 +533,27 @@ class RemoveLink(_PluginBase):
             for video in video_files:
                 if self._delete_file(storage_type, video):
                     deleted_files.append(f"视频：[{storage_type}] {video.path}")
+                    # 清理空目录
+                    dirs = self._delete_empty_dirs(storage_type, video)
+                    deleted_dirs.extend(dirs)
 
             # 发送通知
-            if self._notify and deleted_files:
+            if self._notify and (deleted_files or deleted_dirs):
+                notification_lines = [f"✅ STRM删除触发", f"STRM文件：{strm_file_path}"]
+                notification_lines.extend(deleted_files)
+                notification_lines.extend(deleted_dirs)
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title="🧹 STRM文件清理",
-                    text=f"✅ STRM删除触发\nSTRM文件：{strm_file_path}\n" + "\n".join(deleted_files),
+                    text="\n".join(notification_lines),
                 )
         except Exception as e:
             logger.error(f"处理STRM删除失败：{strm_file_path} - {str(e)} - {traceback.format_exc()}")
 
     def handle_subtitle_deleted(self, subtitle_file_path: Path):
-        """处理字幕文件删除：删完全同名（含后缀）的目标文件"""
+        """处理字幕文件删除：删完全同名文件 + 空目录"""
         deleted_files = []
+        deleted_dirs = []
         try:
             # 获取目标路径（保留完整后缀）
             storage_type, target_path = self._get_target_path(subtitle_file_path, keep_suffix=True)
@@ -506,13 +566,19 @@ class RemoveLink(_PluginBase):
             if subtitle_file:
                 if self._delete_file(storage_type, subtitle_file):
                     deleted_files.append(f"字幕：[{storage_type}] {subtitle_file.path}")
+                    # 清理空目录
+                    dirs = self._delete_empty_dirs(storage_type, subtitle_file)
+                    deleted_dirs.extend(dirs)
 
             # 发送通知
-            if self._notify and deleted_files:
+            if self._notify and (deleted_files or deleted_dirs):
+                notification_lines = [f"✅ 字幕删除触发", f"字幕文件：{subtitle_file_path}"]
+                notification_lines.extend(deleted_files)
+                notification_lines.extend(deleted_dirs)
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title="🧹 字幕文件清理",
-                    text=f"✅ 字幕删除触发\n字幕文件：{subtitle_file_path}\n" + "\n".join(deleted_files),
+                    text="\n".join(notification_lines),
                 )
         except Exception as e:
             logger.error(f"处理字幕删除失败：{subtitle_file_path} - {str(e)} - {traceback.format_exc()}")
