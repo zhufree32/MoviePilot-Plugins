@@ -207,7 +207,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.7"
+    plugin_version = "3.8"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -326,7 +326,18 @@ class RemoveLink(_PluginBase):
             self._delete_torrents = config.get("delete_torrents")
             self._delete_history = config.get("delete_history")
             self._delayed_deletion = config.get("delayed_deletion", True)
-            self._delay_seconds = config.get("delay_seconds", 30)
+            
+            # 修复：确保delay_seconds是整数类型
+            try:
+                delay_seconds = config.get("delay_seconds", 30)
+                if isinstance(delay_seconds, str):
+                    self._delay_seconds = int(delay_seconds)
+                else:
+                    self._delay_seconds = int(delay_seconds)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"无法解析delay_seconds配置，使用默认值30秒: {e}")
+                self._delay_seconds = 30
+            
             self._monitor_strm_deletion = config.get("monitor_strm_deletion", False)
             self.strm_path_mappings = config.get("strm_path_mappings") or ""
             self.custom_scrap_extensions = config.get("custom_scrap_extensions") or ""
@@ -761,7 +772,7 @@ class RemoveLink(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                props: {"cols": 12},
+                                "props": {"cols": 12},
                                 "content": [
                                     {
                                         "component": "VDivider",
@@ -1268,7 +1279,7 @@ class RemoveLink(_PluginBase):
                 for task in self.deletion_queue:
                     if not task.processed:
                         elapsed = (current_time - task.timestamp).total_seconds()
-                        if elapsed >= self._delay_seconds:
+                        if elapsed >= float(self._delay_seconds):  # 确保比较的是数字类型
                             tasks_to_process.append(task)
 
                 if tasks_to_process:
@@ -1301,7 +1312,7 @@ class RemoveLink(_PluginBase):
                 if self.deletion_queue:
                     # 计算下一个任务的等待时间
                     next_task_time = min(
-                        (task.timestamp.timestamp() + self._delay_seconds)
+                        (task.timestamp.timestamp() + float(self._delay_seconds))
                         for task in self.deletion_queue
                         if not task.processed
                     )
@@ -1383,7 +1394,7 @@ class RemoveLink(_PluginBase):
                     with self._timer_lock:
                         if not self._deletion_timer:
                             logger.info(f"启动延迟删除定时器，{self._delay_seconds}秒后检查")
-                            self._deletion_timer = threading.Timer(self._delay_seconds, self._process_deletion_queue)
+                            self._deletion_timer = threading.Timer(float(self._delay_seconds), self._process_deletion_queue)
                             self._deletion_timer.daemon = True
                             self._deletion_timer.start()
             else:
