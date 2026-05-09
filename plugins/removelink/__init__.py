@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import NamedTuple
 
 from watchdog.events import FileSystemEventHandler
@@ -92,7 +92,7 @@ class FileMonitorHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         file_path = Path(event.src_path)
-        logger.debug(f"监测到新增文件：{file_path}")
+        logger.info(f"监测到新增文件：{file_path}")
         self._add_file_to_state(file_path)
 
     def on_moved(self, event):
@@ -102,7 +102,7 @@ class FileMonitorHandler(FileSystemEventHandler):
         src_path = Path(event.src_path)
         dest_path = Path(event.dest_path)
 
-        logger.debug(f"监测到文件移动：{src_path} -> {dest_path}")
+        logger.info(f"监测到文件移动：{src_path} -> {dest_path}")
 
         # 从状态中移除源文件
         with state_lock:
@@ -125,9 +125,7 @@ class FileMonitorHandler(FileSystemEventHandler):
             return
         if file_path.suffix in [".!qB", ".part", ".mp"]:
             return
-            
-        logger.info(f"[{self.monitor_type}]监测到删除文件：{file_path}")
-        
+        logger.info(f"监测到删除文件：{file_path}")
         # 命中过滤关键字不处理
         if self.sync.exclude_keywords:
             for keyword in self.sync.exclude_keywords.split("\n"):
@@ -143,9 +141,6 @@ class FileMonitorHandler(FileSystemEventHandler):
             # STRM 监控目录：只处理 strm 文件删除，其他文件忽略
             if file_ext == ".strm":
                 self.sync.handle_strm_deleted(file_path)
-            # 字幕文件处理
-            elif file_ext in [".srt", ".ass"]:
-                self.sync.handle_subtitle_deleted(file_path)
             # 其他文件（如刮削文件）在 STRM 监控目录中被忽略，避免触发硬链接清理
         else:
             # 硬链接监控目录：处理硬链接文件删除
@@ -207,7 +202,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.8"
+    plugin_version = "2.12"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -257,9 +252,6 @@ class RemoveLink(_PluginBase):
     # 视频文件扩展名
     VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
 
-    # 字幕文件扩展名
-    SUBTITLE_EXTENSIONS = [".srt", ".ass"]
-
     # 属性
     monitor_dirs = ""
     exclude_dirs = ""
@@ -284,8 +276,6 @@ class RemoveLink(_PluginBase):
     deletion_queue: List[DeletionTask] = []
     # 延迟删除定时器
     _deletion_timer = None
-    # 定时器锁
-    _timer_lock = threading.Lock()
 
     @staticmethod
     def __choose_observer():
@@ -312,7 +302,7 @@ class RemoveLink(_PluginBase):
         return PollingObserver()
 
     def init_plugin(self, config: dict = None):
-        logger.info(f"初始化媒体文件清理插件（支持多存储）")
+        logger.info(f"初始化媒体文件清理插件")
         self._transferhistory = TransferHistoryOper()
         self._storagechain = StorageChain()
 
@@ -326,24 +316,18 @@ class RemoveLink(_PluginBase):
             self._delete_torrents = config.get("delete_torrents")
             self._delete_history = config.get("delete_history")
             self._delayed_deletion = config.get("delayed_deletion", True)
-            
-            # 修复：确保delay_seconds是整数类型
-            try:
-                delay_seconds = config.get("delay_seconds", 30)
-                if isinstance(delay_seconds, str):
-                    self._delay_seconds = int(delay_seconds)
-                else:
-                    self._delay_seconds = int(delay_seconds)
-            except (ValueError, TypeError) as e:
-                logger.warning(f"无法解析delay_seconds配置，使用默认值30秒: {e}")
-                self._delay_seconds = 30
-            
             self._monitor_strm_deletion = config.get("monitor_strm_deletion", False)
             self.strm_path_mappings = config.get("strm_path_mappings") or ""
             self.custom_scrap_extensions = config.get("custom_scrap_extensions") or ""
             self._custom_scrap_extensions = self._parse_custom_scrap_extensions(
                 self.custom_scrap_extensions
             )
+            # 验证延迟时间范围，允许用户设置较长的延迟时间（最长 24 小时）
+            delay_seconds = config.get("delay_seconds", 30)
+            try:
+                self._delay_seconds = max(10, min(86400, int(delay_seconds)))
+            except (TypeError, ValueError):
+                self._delay_seconds = 30
 
         # 停止现有任务
         self.stop_service()
@@ -365,21 +349,9 @@ class RemoveLink(_PluginBase):
                 if self.strm_path_mappings:
                     mappings = self._parse_strm_path_mappings()
                     logger.info(f"配置了 {len(mappings)} 个 STRM 路径映射")
-                    
-                    # 验证存储类型是否可用
-                    available_storages = self._get_available_storages()
-                    for local_path, (storage_type, _) in mappings.items():
-                        if storage_type not in available_storages:
-                            logger.warning(f"存储类型 '{storage_type}' 不可用或未启用插件")
-                    
                     # 从映射配置中提取 STRM 监控目录
-                    for local_path in mappings.keys():
-                        normalized_path = os.path.normpath(local_path)
-                        if os.path.exists(normalized_path):
-                            strm_monitor_dirs.append(normalized_path)
-                            logger.info(f"STRM 监控目录添加：{normalized_path}")
-                        else:
-                            logger.warning(f"STRM 监控目录不存在：{normalized_path}")
+                    strm_monitor_dirs = list(mappings.keys())
+                    logger.info(f"STRM 监控目录：{strm_monitor_dirs}")
                 else:
                     logger.warning("STRM 监控已启用但未配置路径映射")
             else:
@@ -388,56 +360,27 @@ class RemoveLink(_PluginBase):
             # 读取硬链接监控目录配置
             hardlink_monitor_dirs = []
             if self.monitor_dirs:
-                for d in self.monitor_dirs.split("\n"):
-                    d = d.strip()
-                    if d:
-                        normalized_path = os.path.normpath(d)
-                        if os.path.exists(normalized_path):
-                            hardlink_monitor_dirs.append(normalized_path)
-                            logger.info(f"硬链接监控目录添加：{normalized_path}")
-                        else:
-                            logger.warning(f"硬链接监控目录不存在：{normalized_path}")
+                hardlink_monitor_dirs = [
+                    d.strip() for d in self.monitor_dirs.split("\n") if d.strip()
+                ]
+                logger.info(f"硬链接监控目录：{hardlink_monitor_dirs}")
 
-            # 去重处理，同一个目录可以用于硬链接和STRM两种监控
-            all_monitor_dirs = list(set(hardlink_monitor_dirs + strm_monitor_dirs))
-            
-            # 更新文件状态
-            if all_monitor_dirs:
-                logger.info(f"开始更新文件状态，监控目录：{all_monitor_dirs}")
-                self.file_state = updateState(all_monitor_dirs)
-                logger.info(f"初始化文件状态完成，共计 {len(self.file_state)} 个文件")
-            else:
-                logger.warning("没有有效的监控目录，跳过文件状态更新")
-
-            # 启动监控
-            for mon_path in all_monitor_dirs:
+            # 启动硬链接监控
+            for mon_path in hardlink_monitor_dirs:
+                if not mon_path:
+                    continue
                 try:
-                    # 为每个目录创建一个观察者
+                    # 使用优化的监控器选择
                     observer = self.__choose_observer()
-                    
-                    # 为硬链接监控添加处理器
-                    if mon_path in hardlink_monitor_dirs:
-                        observer.schedule(
-                            FileMonitorHandler(mon_path, self, monitor_type="hardlink"),
-                            mon_path,
-                            recursive=True,
-                        )
-                        logger.info(f"{mon_path} 的硬链接监控处理器启动")
-                    
-                    # 为STRM监控添加处理器
-                    if mon_path in strm_monitor_dirs:
-                        observer.schedule(
-                            FileMonitorHandler(mon_path, self, monitor_type="strm"),
-                            mon_path,
-                            recursive=True
-                        )
-                        logger.info(f"{mon_path} 的STRM监控处理器启动")
-                    
+                    self._observer.append(observer)
+                    observer.schedule(
+                        FileMonitorHandler(mon_path, self, monitor_type="hardlink"),
+                        mon_path,
+                        recursive=True,
+                    )
                     observer.daemon = True
                     observer.start()
-                    self._observer.append(observer)
-                    logger.info(f"{mon_path} 的监控服务启动（{len(observer.event_handlers)}个处理器）")
-                    
+                    logger.info(f"{mon_path} 的硬链接监控服务启动")
                 except Exception as e:
                     err_msg = str(e)
                     # 特殊处理 inotify 限制错误
@@ -451,26 +394,59 @@ class RemoveLink(_PluginBase):
                              """
                         )
                     else:
-                        logger.error(f"{mon_path} 启动监控失败：{err_msg}")
+                        logger.error(f"{mon_path} 启动硬链接监控失败：{err_msg}")
                     self.systemmessage.put(
-                        f"{mon_path} 启动监控失败：{err_msg}",
+                        f"{mon_path} 启动硬链接监控失败：{err_msg}",
                         title="媒体文件清理",
                     )
 
-            # 启动延迟删除定时器
-            if self._delayed_deletion and self._delay_seconds > 0:
-                with self._timer_lock:
-                    if not self._deletion_timer:
-                        logger.info(f"启动延迟删除定时器，每{self._delay_seconds}秒检查一次")
-                        self._deletion_timer = threading.Timer(self._delay_seconds, self._process_deletion_queue)
-                        self._deletion_timer.daemon = True
-                        self._deletion_timer.start()
+            # 启动 STRM 监控
+            for mon_path in strm_monitor_dirs:
+                if not mon_path:
+                    continue
+                try:
+                    # 使用优化的监控器选择
+                    observer = self.__choose_observer()
+                    self._observer.append(observer)
+                    observer.schedule(
+                        FileMonitorHandler(mon_path, self, monitor_type="strm"),
+                        mon_path,
+                        recursive=True,
+                    )
+                    observer.daemon = True
+                    observer.start()
+                    logger.info(f"{mon_path} 的 STRM 监控服务启动")
+                except Exception as e:
+                    err_msg = str(e)
+                    # 特殊处理 inotify 限制错误
+                    if "inotify" in err_msg and "reached" in err_msg:
+                        logger.warn(
+                            f"目录监控服务启动出现异常：{err_msg}，请在宿主机上（不是docker容器内）执行以下命令并重启："
+                            + """
+                             echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
+                             echo fs.inotify.max_user_instances=524288 | sudo tee -a /etc/sysctl.conf
+                             sudo sysctl -p
+                             """
+                        )
+                    else:
+                        logger.error(f"{mon_path} 启动 STRM 监控失败：{err_msg}")
+                    self.systemmessage.put(
+                        f"{mon_path} 启动 STRM 监控失败：{err_msg}",
+                        title="媒体文件清理",
+                    )
+
+            # 合并所有监控目录用于文件状态更新
+            all_monitor_dirs = hardlink_monitor_dirs + strm_monitor_dirs
+
+            # 更新监控集合 - 在所有线程停止后安全获取锁
+            with state_lock:
+                self.file_state = updateState(all_monitor_dirs)
+                logger.debug("监控集合更新完成")
 
     def get_state(self) -> bool:
         return self._enabled
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """配置表单"""
         return [
             {
                 "component": "VForm",
@@ -488,7 +464,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "title": "🧹 媒体文件清理插件（支持多存储）",
+                                            "title": "🧹 媒体文件清理插件",
                                             "text": "全面的媒体文件清理工具，支持硬链接文件清理和STRM文件清理两种模式，可独立启用。硬链接清理用于监控硬链接文件删除并自动清理相关文件；STRM清理用于监控STRM文件删除并删除对应的网盘文件（支持CloudDrive2等多种存储）。同时支持刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能。",
                                         },
                                     }
@@ -622,7 +598,6 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "model": "delayed_deletion",
                                             "label": "启用延迟删除",
-                                            "hint": "启用延迟删除，避免误删",
                                         },
                                     }
                                 ],
@@ -637,10 +612,9 @@ class RemoveLink(_PluginBase):
                                             "model": "delay_seconds",
                                             "label": "延迟时间(秒)",
                                             "type": "number",
-                                            "min": 5,
+                                            "min": 10,
                                             "max": 86400,
                                             "placeholder": "30",
-                                            "hint": "延迟删除等待时间，默认30秒",
                                         },
                                     }
                                 ],
@@ -697,7 +671,7 @@ class RemoveLink(_PluginBase):
                                             "model": "exclude_keywords",
                                             "label": "排除关键词",
                                             "rows": 3,
-                                            "placeholder": "每一行一个关键词，命中的文件不处理",
+                                            "placeholder": "每一行一个关键词",
                                         },
                                     }
                                 ],
@@ -882,7 +856,22 @@ class RemoveLink(_PluginBase):
                             },
                         ],
                     },
-                    # 存储状态提示
+                    # 公用功能说明
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VDivider",
+                                        "props": {"style": "margin: 20px 0;"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     {
                         "component": "VRow",
                         "content": [
@@ -895,7 +884,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "warning",
                                             "variant": "tonal",
-                                            "text": "注意：请确保对应的存储插件已正确配置并启用，否则STRM删除操作会失败。联动删除种子需安装插件[下载器助手]并打开监听源文件事件。清理刮削文件功能会删除相关的.nfo、.jpg等元数据文件，请谨慎开启。",
+                                            "text": "联动删除种子需安装插件[下载器助手]并打开监听源文件事件。清理刮削文件功能会删除相关的.nfo、.jpg等元数据文件，请谨慎开启。",
                                         },
                                     }
                                 ],
@@ -920,9 +909,18 @@ class RemoveLink(_PluginBase):
             "strm_path_mappings": "",
         }
 
+    def get_page(self) -> List[dict]:
+        pass
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        pass
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        pass
+
     def stop_service(self):
         """
-        停止监控服务
+        退出插件
         """
         logger.debug("开始停止服务")
 
@@ -933,19 +931,19 @@ class RemoveLink(_PluginBase):
                     observer.stop()
                     observer.join()
                 except Exception as e:
+                    print(str(e))
                     logger.error(f"停止目录监控失败：{str(e)}")
         self._observer = []
         logger.debug("文件监控已停止")
 
         # 停止延迟删除定时器
-        with self._timer_lock:
-            if self._deletion_timer:
-                try:
-                    self._deletion_timer.cancel()
-                    self._deletion_timer = None
-                    logger.debug("延迟删除定时器已停止")
-                except Exception as e:
-                    logger.error(f"停止延迟删除定时器失败：{str(e)}")
+        if self._deletion_timer:
+            try:
+                self._deletion_timer.cancel()
+                self._deletion_timer = None
+                logger.debug("延迟删除定时器已停止")
+            except Exception as e:
+                logger.error(f"停止延迟删除定时器失败：{str(e)}")
 
         # 处理剩余的延迟删除任务
         tasks_to_process = []
@@ -963,7 +961,35 @@ class RemoveLink(_PluginBase):
 
         logger.debug("服务停止完成")
 
-    def _parse_custom_scrap_extensions(self, custom_extensions: str) -> List[str]:
+    @staticmethod
+    def _normalize_config_path(config_path: str) -> str:
+        """规范化配置中的目录路径，保留不存在路径的可比较形式。"""
+        return os.path.normcase(os.path.normpath(str(Path(config_path).expanduser())))
+
+    @classmethod
+    def _is_same_or_child_path(cls, path: Path, base_path: str) -> bool:
+        """判断 path 是否等于 base_path 或位于 base_path 下，避免子串误匹配。"""
+        if not base_path:
+            return False
+        normalized_path = cls._normalize_config_path(str(path))
+        normalized_base = cls._normalize_config_path(base_path)
+        try:
+            return os.path.commonpath([normalized_path, normalized_base]) == normalized_base
+        except ValueError:
+            return False
+
+    def __is_excluded(self, file_path: Path) -> bool:
+        """
+        是否排除目录
+        """
+        for exclude_dir in self.exclude_dirs.split("\n"):
+            exclude_dir = exclude_dir.strip()
+            if exclude_dir and self._is_same_or_child_path(file_path, exclude_dir):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_custom_scrap_extensions(custom_extensions: str) -> List[str]:
         """
         解析用户自定义刮削文件后缀，支持换行、逗号和中文逗号分隔。
         """
@@ -1051,31 +1077,6 @@ class RemoveLink(_PluginBase):
             self._transferhistory.delete(transfer_history.id)
             logger.info(f"删除转移记录：{transfer_history.id}")
 
-    def _normalize_config_path(self, config_path: str) -> str:
-        """规范化配置中的目录路径，保留不存在路径的可比较形式。"""
-        return os.path.normcase(os.path.normpath(str(Path(config_path).expanduser())))
-
-    def _is_same_or_child_path(self, path: Path, base_path: str) -> bool:
-        """判断 path 是否等于 base_path 或位于 base_path 下，避免子串误匹配。"""
-        if not base_path:
-            return False
-        normalized_path = self._normalize_config_path(str(path))
-        normalized_base = self._normalize_config_path(base_path)
-        try:
-            return os.path.commonpath([normalized_path, normalized_base]) == normalized_base
-        except ValueError:
-            return False
-
-    def __is_excluded(self, file_path: Path) -> bool:
-        """
-        是否排除目录
-        """
-        for exclude_dir in self.exclude_dirs.split("\n"):
-            exclude_dir = exclude_dir.strip()
-            if exclude_dir and self._is_same_or_child_path(file_path, exclude_dir):
-                return True
-        return False
-
     def delete_empty_folders(self, path):
         """
         从指定路径开始，逐级向上层目录检测并删除空目录，直到遇到非空目录或到达指定监控目录为止
@@ -1156,7 +1157,7 @@ class RemoveLink(_PluginBase):
         执行延迟删除任务
         """
         try:
-            logger.info(f"开始执行延迟删除任务: {task.file_path}")
+            logger.debug(f"开始执行延迟删除任务: {task.file_path}")
 
             # 验证原文件是否仍然被删除（未被重新创建）
             if task.file_path.exists():
@@ -1177,61 +1178,41 @@ class RemoveLink(_PluginBase):
                             return
 
             # 延迟执行所有删除相关操作
-            logger.info(
+            logger.debug(
                 f"文件 {task.file_path} 确认被删除且无重新硬链接，开始执行延迟删除操作"
             )
 
             # 清理刮削文件
-            if self._delete_scrap_infos:
-                self.delete_scrap_infos(task.file_path)
-                
+            self.delete_scrap_infos(task.file_path)
             if self._delete_torrents:
                 # 只有非刮削文件才发送 DownloadFileDeleted 事件
                 if not self._is_scrap_file(task.file_path):
-                    logger.info(f"发送删除种子事件：{task.file_path}")
                     eventmanager.send_event(
                         EventType.DownloadFileDeleted, {"src": str(task.file_path)}
                     )
-                    
             # 删除转移记录
-            if self._delete_history:
-                self.delete_history(str(task.file_path))
+            self.delete_history(str(task.file_path))
 
             # 查找并删除硬链接文件
             deleted_files = []
 
             with state_lock:
-                # 先获取所有相同inode的文件
-                same_inode_files = []
                 for path, file_info in self.file_state.copy().items():
                     if file_info.inode == task.deleted_inode:
-                        same_inode_files.append((path, file_info))
-                
-                logger.info(f"找到 {len(same_inode_files)} 个相同inode的文件")
-                
-                for path, file_info in same_inode_files:
-                    file = Path(path)
-                    if file == task.file_path:
-                        continue  # 跳过源文件本身
-                        
-                    logger.info(f"处理硬链接文件：{file}")
-                    if not self._unlink_tracked_file(file, path, "延迟删除"):
-                        continue
-                    deleted_files.append(path)
+                        file = Path(path)
+                        if not self._unlink_tracked_file(file, path, "延迟删除"):
+                            continue
+                        deleted_files.append(path)
 
-                    # 清理硬链接文件相关的刮削文件
-                    if self._delete_scrap_infos:
+                        # 清理硬链接文件相关的刮削文件
                         self.delete_scrap_infos(file)
-                        
-                    if self._delete_torrents:
-                        # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                        if not self._is_scrap_file(file):
-                            eventmanager.send_event(
-                                EventType.DownloadFileDeleted, {"src": str(file)}
-                            )
-                            
-                    # 删除硬链接文件的转移记录
-                    if self._delete_history:
+                        if self._delete_torrents:
+                            # 只有非刮削文件才发送 DownloadFileDeleted 事件
+                            if not self._is_scrap_file(file):
+                                eventmanager.send_event(
+                                    EventType.DownloadFileDeleted, {"src": str(file)}
+                                )
+                        # 删除硬链接文件的转移记录
                         self.delete_history(str(file))
 
             # 发送通知（在锁外执行）
@@ -1279,11 +1260,11 @@ class RemoveLink(_PluginBase):
                 for task in self.deletion_queue:
                     if not task.processed:
                         elapsed = (current_time - task.timestamp).total_seconds()
-                        if elapsed >= float(self._delay_seconds):  # 确保比较的是数字类型
+                        if elapsed >= self._delay_seconds:
                             tasks_to_process.append(task)
 
                 if tasks_to_process:
-                    logger.info(
+                    logger.debug(
                         f"处理延迟删除队列，待处理任务数: {len(tasks_to_process)}"
                     )
 
@@ -1306,13 +1287,13 @@ class RemoveLink(_PluginBase):
                 cleaned_count = original_count - len(self.deletion_queue)
 
                 if cleaned_count > 0:
-                    logger.info(f"清理了 {cleaned_count} 个已处理的任务")
+                    logger.debug(f"清理了 {cleaned_count} 个已处理的任务")
 
                 # 如果还有未处理的任务，重新启动定时器
                 if self.deletion_queue:
                     # 计算下一个任务的等待时间
                     next_task_time = min(
-                        (task.timestamp.timestamp() + float(self._delay_seconds))
+                        (task.timestamp.timestamp() + self._delay_seconds)
                         for task in self.deletion_queue
                         if not task.processed
                     )
@@ -1322,45 +1303,44 @@ class RemoveLink(_PluginBase):
                         f"还有 {len(self.deletion_queue)} 个任务待处理，"
                         f"{wait_time:.1f} 秒后重新检查"
                     )
-                    
-                    # 重新启动定时器
-                    with self._timer_lock:
-                        if self._deletion_timer:
-                            self._deletion_timer.cancel()
-                        self._deletion_timer = threading.Timer(wait_time, self._process_deletion_queue)
-                        self._deletion_timer.daemon = True
-                        self._deletion_timer.start()
+                    self._start_deletion_timer(wait_time)
                 else:
-                    with self._timer_lock:
-                        if self._deletion_timer:
-                            self._deletion_timer.cancel()
-                            self._deletion_timer = None
-                    logger.info("延迟删除队列已清空，定时器停止")
+                    self._deletion_timer = None
+                    logger.debug("延迟删除队列已清空，定时器停止")
 
         except Exception as e:
             logger.error(f"处理延迟删除队列失败：{str(e)} - {traceback.format_exc()}")
             # 确保定时器状态正确
-            with self._timer_lock:
-                if self._deletion_timer:
-                    self._deletion_timer.cancel()
-                    self._deletion_timer = None
+            with deletion_queue_lock:
+                self._deletion_timer = None
+
+    def _start_deletion_timer(self, delay_time: float = None):
+        """
+        启动延迟删除定时器
+        注意：此方法假设调用前已检查没有运行中的定时器
+        """
+        if delay_time is None:
+            delay_time = self._delay_seconds
+
+        self._deletion_timer = threading.Timer(delay_time, self._process_deletion_queue)
+        self._deletion_timer.daemon = True
+        self._deletion_timer.start()
 
     def handle_deleted(self, file_path: Path):
         """
         处理删除事件
         """
-        logger.info(f"处理删除事件: {file_path}")
+        logger.debug(f"处理删除事件: {file_path}")
 
         # 删除的文件对应的监控信息
         with state_lock:
             # 删除的文件信息
             file_info = self.file_state.get(str(file_path))
             if not file_info:
-                logger.info(f"文件 {file_path} 未在监控列表中，跳过处理")
+                logger.debug(f"文件 {file_path} 未在监控列表中，跳过处理")
                 return
             else:
                 deleted_inode = file_info.inode
-                logger.info(f"从监控列表中移除：{file_path}, inode: {deleted_inode}")
                 self.file_state.pop(str(file_path))
 
             # 根据配置选择立即删除或延迟删除
@@ -1376,81 +1356,48 @@ class RemoveLink(_PluginBase):
                 )
 
                 with deletion_queue_lock:
-                    # 检查是否已有相同文件的任务
-                    existing_task = None
-                    for t in self.deletion_queue:
-                        if str(t.file_path) == str(file_path) and not t.processed:
-                            existing_task = t
-                            break
-                    
-                    if existing_task:
-                        logger.info(f"文件 {file_path} 已在延迟删除队列中，跳过重复添加")
-                        return
-                    
                     self.deletion_queue.append(task)
-                    logger.info(f"延迟删除队列当前大小: {len(self.deletion_queue)}")
-                    
-                    # 启动或重启定时器
-                    with self._timer_lock:
-                        if not self._deletion_timer:
-                            logger.info(f"启动延迟删除定时器，{self._delay_seconds}秒后检查")
-                            self._deletion_timer = threading.Timer(float(self._delay_seconds), self._process_deletion_queue)
-                            self._deletion_timer.daemon = True
-                            self._deletion_timer.start()
+                    # 只有在没有定时器运行时才启动新的定时器
+                    # 避免频繁的删除事件重置定时器导致任务永远不被处理
+                    if not self._deletion_timer:
+                        self._start_deletion_timer()
+                        logger.debug("启动延迟删除定时器")
+                    else:
+                        logger.debug("延迟删除定时器已在运行，任务已加入队列")
             else:
                 # 立即删除模式（原有逻辑）
-                logger.info(f"立即删除模式处理：{file_path}")
                 deleted_files = []
 
                 # 清理刮削文件
-                if self._delete_scrap_infos:
-                    self.delete_scrap_infos(file_path)
-                    
+                self.delete_scrap_infos(file_path)
                 if self._delete_torrents:
                     # 只有非刮削文件才发送 DownloadFileDeleted 事件
                     if not self._is_scrap_file(file_path):
-                        logger.info(f"发送删除种子事件：{file_path}")
                         eventmanager.send_event(
                             EventType.DownloadFileDeleted, {"src": str(file_path)}
                         )
-                        
                 # 删除转移记录
-                if self._delete_history:
-                    self.delete_history(str(file_path))
+                self.delete_history(str(file_path))
 
                 try:
                     # 在file_state中查找与deleted_inode有相同inode的文件并删除
-                    same_inode_files = []
                     for path, file_info in self.file_state.copy().items():
                         if file_info.inode == deleted_inode:
-                            same_inode_files.append((path, file_info))
-                    
-                    logger.info(f"找到 {len(same_inode_files)} 个相同inode的文件")
-                    
-                    for path, file_info in same_inode_files:
-                        file = Path(path)
-                        if file == file_path:
-                            continue  # 跳过源文件本身
-                            
-                        logger.info(f"处理硬链接文件：{file}")
-                        if not self._unlink_tracked_file(file, path, "立即删除"):
-                            continue
-                        deleted_files.append(path)
+                            file = Path(path)
+                            if not self._unlink_tracked_file(file, path, "立即删除"):
+                                continue
+                            deleted_files.append(path)
 
-                        # 清理刮削文件
-                        if self._delete_scrap_infos:
+                            # 清理刮削文件
                             self.delete_scrap_infos(file)
-                            
-                        if self._delete_torrents:
-                            # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                            if not self._is_scrap_file(file):
-                                eventmanager.send_event(
-                                    EventType.DownloadFileDeleted,
-                                    {"src": str(file)},
-                                )
-                                
-                        # 删除转移记录
-                        if self._delete_history:
+                            if self._delete_torrents:
+                                # 只有非刮削文件才发送 DownloadFileDeleted 事件
+                                if not self._is_scrap_file(file):
+                                    eventmanager.send_event(
+                                        EventType.DownloadFileDeleted,
+                                        {"src": str(file)},
+                                    )
+                            # 删除转移记录
                             self.delete_history(str(file))
 
                     # 发送通知
@@ -1488,252 +1435,503 @@ class RemoveLink(_PluginBase):
                     )
 
     def _parse_strm_path_mappings(self) -> Dict[str, Tuple[str, str]]:
-        """解析STRM路径映射（支持多存储）"""
+        """
+        解析 strm 路径映射配置
+        返回格式: {strm_path: (storage_type, storage_path)}
+        """
         mappings = {}
         if not self.strm_path_mappings:
             return mappings
+
         for line in self.strm_path_mappings.split("\n"):
             line = line.strip()
             if not line or ":" not in line:
                 continue
             try:
+                # 支持格式: strm_path:storage_type:storage_path 或 strm_path:storage_path (默认local)
                 parts = line.split(":", 2)
                 if len(parts) == 2:
-                    local_path, storage_path = parts
+                    # 默认使用 local 存储
+                    strm_path, storage_path = parts
                     storage_type = "local"
                 elif len(parts) == 3:
-                    local_path, storage_type, storage_path = parts
+                    # 指定存储类型
+                    strm_path, storage_type, storage_path = parts
                 else:
-                    logger.warning(f"无效的STRM路径映射：{line}")
+                    logger.warning(f"无效的 strm 路径映射配置: {line}")
                     continue
-                # 校验路径合法性
-                local_path = local_path.strip()
-                storage_type = storage_type.strip()
-                storage_path = storage_path.strip()
-                if not local_path or not storage_type or not storage_path:
-                    continue
-                # 规范化本地路径
-                local_path = os.path.normpath(local_path)
-                # 存储目标路径，确保以/开头
-                if not storage_path.startswith("/"):
-                    storage_path = "/" + storage_path
-                mappings[local_path] = (storage_type, storage_path)
-                logger.debug(f"解析STRM路径映射：{local_path} -> [{storage_type}] {storage_path}")
-            except Exception as e:
-                logger.warning(f"解析STRM路径映射失败：{line}，错误：{e}")
+
+                mappings[strm_path.strip()] = (
+                    storage_type.strip(),
+                    storage_path.strip(),
+                )
+            except ValueError:
+                logger.warning(f"无效的 strm 路径映射配置: {line}")
+
         return mappings
 
-    def _get_available_storages(self) -> List[str]:
-        """获取所有可用的存储类型"""
-        try:
-            # 尝试从系统配置获取
-            from app.db.systemconfig_oper import SystemConfigOper
-            system_config = SystemConfigOper()
-            # 这里需要根据实际系统实现获取存储配置
-            # 暂时返回已知的常见存储类型
-            return ["local", "CloudDrive储存", "alipan", "u115", "rclone", "alist"]
-        except Exception as e:
-            logger.error(f"获取可用存储类型失败：{e}")
-            return ["local"]
-
-    def _get_target_path(self, local_file_path: Path, keep_suffix: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    def _get_storage_path_from_strm(self, strm_file_path: Path) -> Tuple[str, str]:
         """
-        获取本地文件对应的目标存储路径
-        :param local_file_path: 本地文件路径
-        :param keep_suffix: 是否保留后缀（True=保留，False=去掉后缀，仅STRM用）
-        :return: (存储类型, 目标路径)
+        根据 strm 文件路径获取对应的网盘存储路径
+        返回 (storage_type, storage_path) 或 (None, None)
         """
         mappings = self._parse_strm_path_mappings()
-        local_path_str = str(local_file_path)
-        
-        for local_prefix, (storage_type, storage_prefix) in mappings.items():
-            if local_path_str.startswith(local_prefix):
+        strm_path_str = str(strm_file_path)
+
+        for strm_prefix, (storage_type, storage_prefix) in mappings.items():
+            if strm_path_str.startswith(strm_prefix):
                 # 计算相对路径
-                relative_path = os.path.relpath(local_path_str, local_prefix)
-                relative_path = relative_path.replace("\\", "/")  # Windows路径转Unix风格
-                
-                # 处理后缀（STRM去掉.strm，字幕保留完整后缀）
-                if not keep_suffix and relative_path.lower().endswith(".strm"):
-                    relative_path = relative_path[:-5]  # 去掉.strm后缀
-                
-                # 构建目标路径
-                target_path = f"{storage_prefix.rstrip('/')}/{relative_path}"
-                logger.debug(f"本地文件 {local_file_path} 映射到：[{storage_type}] {target_path}")
-                return storage_type, target_path
-        
-        logger.warning(f"本地文件 {local_file_path} 未找到对应的STRM路径映射")
+                relative_path = strm_path_str[len(strm_prefix) :].lstrip("/")
+                # 构建网盘路径，去掉 .strm 后缀
+                storage_file_path = storage_prefix.rstrip("/") + "/" + relative_path
+                if storage_file_path.endswith(".strm"):
+                    storage_file_path = storage_file_path[:-5]  # 去掉 .strm 后缀
+
+                return storage_type, storage_file_path
+
         return None, None
 
-    def _find_file_by_full_name(self, storage_type: str, target_path: str) -> Optional[schemas.FileItem]:
+    def _find_storage_media_file(
+        self, storage_type: str, base_path: str
+    ) -> Optional[schemas.FileItem]:
         """
-        按完全文件名（含路径+后缀）查找目标文件
-        用于字幕文件的精准匹配
+        在网盘中查找以指定路径为前缀的视频文件
+        支持 CloudDrive储存 和其他存储类型
         """
-        # 拆分目录和文件名
-        target_dir = str(Path(target_path).parent)
-        target_filename = Path(target_path).name
-        
-        # 构建目录Item
-        dir_item = schemas.FileItem(
+        # 获取父目录
+        parent_path = str(Path(base_path).parent)
+        parent_item = schemas.FileItem(
             storage=storage_type,
-            path=target_dir if target_dir.endswith("/") else target_dir + "/",
+            path=parent_path if parent_path.endswith("/") else parent_path + "/",
             type="dir",
         )
-        
-        # 检查目录是否存在
-        try:
-            if not self._storagechain.exists(dir_item):
-                logger.debug(f"目标目录不存在：[{storage_type}] {target_dir}")
-                return None
-        except Exception as e:
-            logger.error(f"检查目录存在性失败 [{storage_type}] {target_dir}: {e}")
-            return None
-        
-        # 遍历目录找完全同名的文件
-        try:
-            files = self._storagechain.list_files(dir_item, recursion=False)
-            for file_item in files:
-                if file_item.type == "file" and file_item.name == target_filename:
-                    logger.info(f"找到完全匹配的文件：[{storage_type}] {file_item.path}")
-                    return file_item
-            
-            logger.info(f"未找到完全匹配的文件：[{storage_type}] {target_path}")
-            return None
-        except Exception as e:
-            logger.error(f"列出目录文件失败 [{storage_type}] {target_dir}: {e}")
+
+        # 检查父目录是否存在
+        if not self._storagechain.exists(parent_item):
+            logger.debug(f"父目录不存在: [{storage_type}] {parent_path}")
             return None
 
-    def _find_video_by_basename(self, storage_type: str, target_path: str) -> List[schemas.FileItem]:
-        """按基础名（去后缀）查找同名视频文件（STRM逻辑）"""
-        # 获取基础名
-        base_name = Path(target_path).name
-        target_dir = str(Path(target_path).parent)
+        # 列出父目录中的文件
+        files = self._storagechain.list_files(parent_item, recursion=False)
+        if not files:
+            logger.debug(f"父目录为空: [{storage_type}] {parent_path}")
+            return None
+
+        # 查找以 base_path 为前缀的视频文件
+        base_name = Path(base_path).name
+        logger.info(f"在目录 {parent_path} 中查找以 {base_name} 开头的视频文件")
         
-        # 构建目录Item
-        dir_item = schemas.FileItem(
-            storage=storage_type,
-            path=target_dir if target_dir.endswith("/") else target_dir + "/",
-            type="dir",
-        )
-        
-        try:
-            if not self._storagechain.exists(dir_item):
-                logger.debug(f"目标目录不存在：[{storage_type}] {target_dir}")
-                return []
-        except Exception as e:
-            logger.error(f"检查目录存在性失败 [{storage_type}] {target_dir}: {e}")
-            return []
-        
-        # 查找同名视频
-        try:
-            files = self._storagechain.list_files(dir_item, recursion=False)
-            matched = []
-            for file_item in files:
-                if file_item.type != "file":
-                    continue
-                file_basename = Path(file_item.name).stem
+        for file_item in files:
+            if file_item.type == "file" and file_item.name.startswith(base_name):
+                # 检查是否为视频文件
                 file_ext = Path(file_item.name).suffix.lower()
-                if file_basename == base_name and file_ext in self.VIDEO_EXTENSIONS:
-                    logger.info(f"找到同名视频文件：[{storage_type}] {file_item.path}")
-                    matched.append(file_item)
-            
-            if not matched:
-                logger.info(f"未找到与「{base_name}」同名的视频文件")
-            return matched
-        except Exception as e:
-            logger.error(f"列出目录文件失败 [{storage_type}] {target_dir}: {e}")
-            return []
+                if file_ext in self.VIDEO_EXTENSIONS:
+                    logger.info(
+                        f"找到匹配的视频文件: [{storage_type}] {file_item.path}"
+                    )
+                    return file_item
 
-    def _delete_storage_file(self, storage_type: str, file_item: schemas.FileItem) -> bool:
-        """删除存储中的文件，返回是否成功"""
+        logger.debug(f"未找到匹配的视频文件: [{storage_type}] {base_path}")
+        return None
+
+    def _delete_storage_scrap_files(
+        self, storage_type: str, storage_file_item: schemas.FileItem
+    ) -> int:
+        """
+        删除网盘中的刮削文件
+        返回删除的文件数量
+        """
+        if not self._delete_scrap_infos:
+            return 0
+
+        deleted_count = 0
         try:
-            logger.info(f"准备删除：[{storage_type}] {file_item.path}")
-            success = self._storagechain.delete_file(file_item)
-            if success:
-                logger.info(f"成功删除：[{storage_type}] {file_item.path}")
-                return True
-            else:
-                logger.error(f"删除失败：[{storage_type}] {file_item.path}")
-                return False
+            # 获取父目录
+            parent_path = str(Path(storage_file_item.path).parent)
+            parent_item = schemas.FileItem(
+                storage=storage_type,
+                path=parent_path if parent_path.endswith("/") else parent_path + "/",
+                type="dir",
+            )
+
+            # 检查父目录是否存在
+            if not self._storagechain.exists(parent_item):
+                logger.debug(f"网盘父目录不存在: [{storage_type}] {parent_path}")
+                return 0
+
+            # 列出父目录中的文件
+            files = self._storagechain.list_files(parent_item, recursion=False)
+            if not files:
+                logger.debug(f"网盘父目录为空: [{storage_type}] {parent_path}")
+                return 0
+
+            # 获取视频文件的基础名称（不含扩展名）
+            base_name = Path(storage_file_item.path).stem
+
+            # 查找并删除刮削文件
+            for file_item in files:
+                if file_item.type == "file":
+                    file_stem = Path(file_item.name).stem
+                    file_ext = Path(file_item.name).suffix.lower()
+
+                    # 检查是否为相关的刮削文件
+                    if (
+                        file_stem.startswith(base_name)
+                        and self._is_scrap_file(Path(file_item.name))
+                    ) or (
+                        file_item.name.lower()
+                        in [
+                            "poster.jpg",
+                            "backdrop.jpg",
+                            "fanart.jpg",
+                            "banner.jpg",
+                            "logo.png",
+                        ]
+                    ):
+
+                        # 删除刮削文件
+                        if self._storagechain.delete_file(file_item):
+                            logger.info(
+                                f"删除网盘刮削文件: [{storage_type}] {file_item.path}"
+                            )
+                            deleted_count += 1
+                        else:
+                            logger.warning(
+                                f"删除网盘刮削文件失败: [{storage_type}] {file_item.path}"
+                            )
+
+            logger.info(
+                f"网盘刮削文件清理完成: [{storage_type}] {parent_path}，删除了 {deleted_count} 个文件"
+            )
+
         except Exception as e:
-            logger.error(f"删除异常：[{storage_type}] {file_item.path} - {str(e)}")
-            return False
+            logger.error(
+                f"清理网盘刮削文件失败: [{storage_type}] {storage_file_item.path} - {str(e)}"
+            )
+
+        return deleted_count
+
+    def _delete_storage_empty_folders(
+        self, storage_type: str, storage_file_item: schemas.FileItem
+    ) -> int:
+        """
+        删除网盘中的空目录
+        返回删除的目录数量
+        """
+        deleted_count = 0
+        try:
+            # 获取父目录
+            parent_path = str(Path(storage_file_item.path).parent)
+            current_path = parent_path
+
+            # 逐级向上检查并删除空目录
+            while current_path and current_path != "/" and current_path != "\\":
+                # 获取当前目录的正确 FileItem（包含 fileid）
+                current_item = self._get_storage_dir_item(storage_type, current_path)
+                if not current_item:
+                    logger.debug(f"网盘目录不存在: [{storage_type}] {current_path}")
+                    break
+
+                # 列出目录中的文件
+                files = self._storagechain.list_files(current_item, recursion=False)
+
+                if not files:
+                    # 目录为空，删除它
+                    if self._delete_storage_empty_dir(storage_type, current_item):
+                        logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
+                        deleted_count += 1
+
+                        # 继续检查上级目录
+                        current_path = str(Path(current_path).parent)
+                        if current_path == current_path.replace(
+                            str(Path(current_path).name), ""
+                        ).rstrip("/\\"):
+                            # 已到达根目录
+                            break
+                    else:
+                        logger.warning(
+                            f"删除网盘空目录失败: [{storage_type}] {current_path}"
+                        )
+                        break
+                else:
+                    # 目录不为空，检查是否只包含刮削文件
+                    only_scrap_files = True
+                    for file_item in files:
+                        if file_item.type == "file":
+                            if not self._is_scrap_file(Path(file_item.name)):
+                                only_scrap_files = False
+                                break
+                        else:
+                            # 包含子目录，不删除
+                            only_scrap_files = False
+                            break
+
+                    if only_scrap_files and files:
+                        # 目录只包含刮削文件，删除所有文件
+                        for file_item in files:
+                            if file_item.type == "file":
+                                if self._storagechain.delete_file(file_item):
+                                    logger.info(
+                                        f"删除网盘刮削文件: [{storage_type}] {file_item.path}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"删除网盘刮削文件失败: [{storage_type}] {file_item.path}"
+                                    )
+
+                        # 重新获取目录信息并检查是否为空
+                        current_item = self._get_storage_dir_item(
+                            storage_type, current_path
+                        )
+                        if current_item:
+                            files = self._storagechain.list_files(
+                                current_item, recursion=False
+                            )
+                            if not files:
+                                # 现在目录为空，删除它
+                                if self._delete_storage_empty_dir(
+                                    storage_type, current_item
+                                ):
+                                    logger.info(
+                                        f"删除网盘空目录: [{storage_type}] {current_path}"
+                                    )
+                                    deleted_count += 1
+
+                                    # 继续检查上级目录
+                                    current_path = str(Path(current_path).parent)
+                                    if current_path == current_path.replace(
+                                        str(Path(current_path).name), ""
+                                    ).rstrip("/\\"):
+                                        break
+                                else:
+                                    break
+                            else:
+                                break
+                        else:
+                            break
+                    else:
+                        # 目录包含非刮削文件或子目录，停止向上检查
+                        break
+
+            if deleted_count > 0:
+                logger.info(
+                    f"网盘空目录清理完成: [{storage_type}] 删除了 {deleted_count} 个目录"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"清理网盘空目录失败: [{storage_type}] {storage_file_item.path} - {str(e)}"
+            )
+
+        return deleted_count
+
+    def _delete_storage_empty_dir(
+        self, storage_type: str, dir_item: schemas.FileItem
+    ) -> bool:
+        """
+        精确删除指定网盘空目录。
+
+        OpenList/Alist 的 remove_empty_directory 只清理传入目录下一级空目录，
+        不能删除传入目录本身。这里复用通用删除接口的语义，让适配器走
+        /api/fs/remove 等价路径，避免把路径改到父目录后触发父目录扫描。
+        """
+        if storage_type.lower() not in ("alist", "openlist"):
+            return bool(self._storagechain.delete_file(dir_item))
+
+        delete_item = self._as_storage_remove_item(dir_item)
+        return bool(self._storagechain.delete_file(delete_item))
+
+    @staticmethod
+    def _as_storage_remove_item(file_item: schemas.FileItem) -> schemas.FileItem:
+        """
+        构造用于通用 remove 删除的 FileItem。
+
+        MoviePilot 的 Alist/OpenList 适配器会在 type == "dir" 且为空目录时
+        优先使用 remove_empty_directory；将删除请求作为通用条目传入，可以
+        让适配器使用 /api/fs/remove 删除 file_item.path 指定的目录本身。
+        """
+        try:
+            if hasattr(file_item, "model_copy"):
+                delete_item = file_item.model_copy(update={"type": "file"})
+            elif hasattr(file_item, "copy"):
+                delete_item = file_item.copy(update={"type": "file"})
+            else:
+                delete_item = copy.copy(file_item)
+                delete_item.type = "file"
+        except Exception:
+            delete_item = copy.copy(file_item)
+            delete_item.type = "file"
+
+        if not getattr(delete_item, "name", None):
+            delete_item.name = Path(delete_item.path).name
+
+        return delete_item
+
+    def _get_storage_dir_item(
+        self, storage_type: str, dir_path: str
+    ) -> schemas.FileItem:
+        """
+        获取网盘目录的正确 FileItem（包含 fileid）
+        """
+        try:
+            # 获取父目录
+            parent_path = str(Path(dir_path).parent)
+            if parent_path == dir_path:
+                # 已经是根目录
+                return None
+
+            parent_item = schemas.FileItem(
+                storage=storage_type,
+                path=parent_path if parent_path.endswith("/") else parent_path + "/",
+                type="dir",
+            )
+
+            # 检查父目录是否存在
+            if not self._storagechain.exists(parent_item):
+                return None
+
+            # 列出父目录中的文件，查找目标目录
+            files = self._storagechain.list_files(parent_item, recursion=False)
+            if not files:
+                return None
+
+            # 查找目标目录
+            target_name = Path(dir_path).name
+            for file_item in files:
+                if file_item.type == "dir" and file_item.name == target_name:
+                    return file_item
+
+            return None
+
+        except Exception as e:
+            logger.debug(
+                f"获取网盘目录信息失败: [{storage_type}] {dir_path} - {str(e)}"
+            )
+            return None
 
     def handle_strm_deleted(self, strm_file_path: Path):
-        """处理STRM文件删除：删同名视频 + 空目录"""
-        deleted_files = []
-        deleted_dirs = []
+        """
+        处理 strm 文件删除事件
+        """
+        logger.info(f"处理 strm 文件删除: {strm_file_path}")
+
         try:
-            # 获取目标路径（去掉.strm后缀）
-            storage_type, target_path = self._get_target_path(strm_file_path, keep_suffix=False)
-            if not storage_type or not target_path:
-                logger.warning(f"未找到STRM文件 {strm_file_path} 的路径映射")
-                return
+            # 获取对应的网盘文件路径
+            storage_type, storage_path = self._get_storage_path_from_strm(
+                strm_file_path
+            )
 
-            logger.info(f"STRM文件删除触发，映射到：[{storage_type}] {target_path}")
-
-            # 查找同名视频
-            video_files = self._find_video_by_basename(storage_type, target_path)
-            for video in video_files:
-                if self._delete_storage_file(storage_type, video):
-                    deleted_files.append(f"视频：[{storage_type}] {video.path}")
-
-            # 发送通知
-            if self._notify and deleted_files:
-                notification_lines = [f"✅ STRM删除触发", f"STRM文件：{strm_file_path}"]
-                if deleted_files:
-                    notification_lines.append("删除的文件：")
-                    notification_lines.extend(deleted_files)
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title="🧹 STRM文件清理",
-                    text="\n".join(notification_lines),
+            if not storage_type or not storage_path:
+                logger.warning(
+                    f"无法找到 strm 文件 {strm_file_path} 对应的网盘路径映射"
                 )
-            elif not deleted_files:
-                logger.info(f"未找到与STRM文件 {strm_file_path} 对应的视频文件")
-        except Exception as e:
-            logger.error(f"处理STRM删除失败：{strm_file_path} - {str(e)} - {traceback.format_exc()}")
-
-    def handle_subtitle_deleted(self, subtitle_file_path: Path):
-        """处理字幕文件删除：删完全同名文件 + 空目录"""
-        deleted_files = []
-        deleted_dirs = []
-        try:
-            # 获取目标路径（保留完整后缀）
-            storage_type, target_path = self._get_target_path(subtitle_file_path, keep_suffix=True)
-            if not storage_type or not target_path:
-                logger.warning(f"未找到字幕文件 {subtitle_file_path} 的路径映射")
                 return
 
-            logger.info(f"字幕文件删除触发，映射到：[{storage_type}] {target_path}")
+            # 查找网盘中的视频文件
+            storage_file_item = self._find_storage_media_file(
+                storage_type, storage_path
+            )
 
-            # 查找完全同名的字幕文件
-            subtitle_file = self._find_file_by_full_name(storage_type, target_path)
-            if subtitle_file:
-                if self._delete_storage_file(storage_type, subtitle_file):
-                    deleted_files.append(f"字幕：[{storage_type}] {subtitle_file.path}")
+            if not storage_file_item:
+                logger.info(
+                    f"网盘中未找到对应的视频文件: [{storage_type}] {storage_path}"
+                )
+                return
+
+            logger.info(f"准备删除网盘文件: [{storage_type}] {storage_file_item.path}")
+
+            # 删除网盘文件
+            if self._storagechain.delete_file(storage_file_item):
+                logger.info(
+                    f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
+                )
+
+                # 清理本地 strm 目录的刮削文件
+                local_scrap_deleted = 0
+                if self._delete_scrap_infos:
+                    self.delete_scrap_infos(strm_file_path)
+                    local_scrap_deleted = 1  # 简化计数，实际可能删除多个
+
+                # 清理网盘上的刮削文件
+                storage_scrap_deleted = 0
+                storage_dirs_deleted = 0
+                if self._delete_scrap_infos:
+                    storage_scrap_deleted = self._delete_storage_scrap_files(
+                        storage_type, storage_file_item
+                    )
+                    # 清理网盘空目录
+                    storage_dirs_deleted = self._delete_storage_empty_folders(
+                        storage_type, storage_file_item
+                    )
+
+                # 删除转移记录（通过网盘文件路径查询）
+                history_deleted = False
+                if self._delete_history:
+                    history_deleted = self.delete_history_by_dest(
+                        storage_file_item.path
+                    )
+
+                # 发送通知
+                if self._notify:
+                    # 构建通知内容
+                    notification_parts = [f"🗂️ STRM 文件：{strm_file_path}"]
+                    notification_parts.append(
+                        f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
+                    )
+
+                    # 添加其他操作记录
+                    if self._delete_history:
+                        if history_deleted:
+                            notification_parts.append("📝 已清理转移记录")
+                        else:
+                            notification_parts.append("📝 无转移记录")
+                    if self._delete_scrap_infos:
+                        if local_scrap_deleted > 0 and storage_scrap_deleted > 0:
+                            scrap_msg = f"🖼️ 已清理刮削文件（本地+网盘 {storage_scrap_deleted} 个）"
+                        elif local_scrap_deleted > 0:
+                            scrap_msg = "🖼️ 已清理本地刮削文件"
+                        elif storage_scrap_deleted > 0:
+                            scrap_msg = (
+                                f"🖼️ 已清理网盘刮削文件（{storage_scrap_deleted} 个）"
+                            )
+                        else:
+                            scrap_msg = "🖼️ 无刮削文件需要清理"
+
+                        # 添加空目录清理信息
+                        if storage_dirs_deleted > 0:
+                            scrap_msg += f"，清理空目录 {storage_dirs_deleted} 个"
+
+                        notification_parts.append(scrap_msg)
+
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="🧹 媒体文件清理",
+                        text=f"✅ 清理完成\n\n" + "\n".join(notification_parts),
+                    )
             else:
-                logger.info(f"未找到与字幕文件 {subtitle_file_path} 对应的目标文件")
-
-            # 发送通知
-            if self._notify and deleted_files:
-                notification_lines = [f"✅ 字幕删除触发", f"字幕文件：{subtitle_file_path}"]
-                if deleted_files:
-                    notification_lines.append("删除的文件：")
-                    notification_lines.extend(deleted_files)
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title="🧹 字幕文件清理",
-                    text="\n".join(notification_lines),
+                logger.error(
+                    f"删除网盘文件失败: [{storage_type}] {storage_file_item.path}"
                 )
+
         except Exception as e:
-            logger.error(f"处理字幕删除失败：{subtitle_file_path} - {str(e)} - {traceback.format_exc()}")
+            logger.error(
+                f"处理 strm 文件删除失败: {strm_file_path} - {str(e)} - {traceback.format_exc()}"
+            )
 
-    def get_page(self) -> List[dict]:
-        return []
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        return []
-
-    def get_command(self) -> List[Dict[str, Any]]:
-        return []
+    def delete_history_by_dest(self, dest_path: str) -> bool:
+        """
+        通过目标路径删除转移记录
+        返回是否成功删除了转移记录
+        """
+        if not self._delete_history:
+            return False
+        # 查找转移记录
+        transfer_history = self._transferhistory.get_by_dest(dest_path)
+        if transfer_history:
+            # 删除转移记录
+            self._transferhistory.delete(transfer_history.id)
+            logger.info(f"删除转移记录：{transfer_history.id} - {dest_path}")
+            return True
+        else:
+            logger.debug(f"未找到转移记录：{dest_path}")
+            return False
