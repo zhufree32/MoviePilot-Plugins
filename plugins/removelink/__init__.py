@@ -205,7 +205,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.2"
+    plugin_version = "3.4"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -1814,4 +1814,149 @@ class RemoveLink(_PluginBase):
             )
 
             # 检查父目录是否存在
-            if not
+            if not self._storagechain.exists(parent_item):
+                logger.debug(f"网盘父目录不存在: [{storage_type}] {parent_path}")
+                return 0
+
+            # 列出父目录中的文件
+            files = self._storagechain.list_files(parent_item, recursion=False)
+            if not files:
+                logger.debug(f"网盘父目录为空: [{storage_type}] {parent_path}")
+                return 0
+
+            # 获取视频文件的基础名称（不含扩展名）
+            base_name = Path(storage_file_item.path).stem
+
+            # 查找并删除刮削文件
+            for file_item in files:
+                if file_item.type == "file":
+                    file_stem = Path(file_item.name).stem
+                    file_ext = Path(file_item.name).suffix.lower()
+
+                    # 检查是否为相关的刮削文件
+                    if (
+                        file_stem.startswith(base_name)
+                        and self._is_scrap_file(Path(file_item.name))
+                    ) or (
+                        file_item.name.lower()
+                        in [
+                            "poster.jpg",
+                            "backdrop.jpg",
+                            "fanart.jpg",
+                            "banner.jpg",
+                            "logo.png",
+                        ]
+                    ):
+
+                        # 删除刮削文件
+                        if self._storagechain.delete_file(file_item):
+                            logger.info(
+                                f"删除网盘刮削文件: [{storage_type}] {file_item.path}"
+                            )
+                            deleted_count += 1
+                        else:
+                            logger.warning(
+                                f"删除网盘刮削文件失败: [{storage_type}] {file_item.path}"
+                            )
+
+            logger.info(
+                f"网盘刮削文件清理完成: [{storage_type}] {parent_path}，删除了 {deleted_count} 个文件"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"清理网盘刮削文件失败: [{storage_type}] {storage_file_item.path} - {str(e)}"
+            )
+
+        return deleted_count
+
+    def handle_strm_deleted(self, strm_file_path: Path):
+        """处理STRM文件删除：删同名视频 + 空目录"""
+        deleted_files = []
+        deleted_dirs = []
+        try:
+            # 获取目标路径（去掉.strm后缀）
+            storage_type, target_path = self._get_target_path(strm_file_path, keep_suffix=False)
+            if not storage_type or not target_path:
+                logger.warning(f"未找到STRM文件 {strm_file_path} 的路径映射")
+                return
+
+            logger.info(f"STRM文件删除触发，映射到：[{storage_type}] {target_path}")
+
+            # 查找同名视频
+            video_files = self._find_video_by_basename(storage_type, target_path)
+            for video in video_files:
+                if self._delete_storage_file(storage_type, video):
+                    deleted_files.append(f"视频：[{storage_type}] {video.path}")
+                    # 清理空目录
+                    dirs = self._delete_empty_storage_dirs(storage_type, video)
+                    deleted_dirs.extend(dirs)
+
+            # 发送通知
+            if self._notify and (deleted_files or deleted_dirs):
+                notification_lines = [f"✅ STRM删除触发", f"STRM文件：{strm_file_path}"]
+                if deleted_files:
+                    notification_lines.append("删除的文件：")
+                    notification_lines.extend(deleted_files)
+                if deleted_dirs:
+                    notification_lines.append("清理的空目录：")
+                    notification_lines.extend(deleted_dirs)
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="🧹 STRM文件清理",
+                    text="\n".join(notification_lines),
+                )
+            elif not deleted_files and not deleted_dirs:
+                logger.info(f"未找到与STRM文件 {strm_file_path} 对应的视频文件")
+        except Exception as e:
+            logger.error(f"处理STRM删除失败：{strm_file_path} - {str(e)} - {traceback.format_exc()}")
+
+    def handle_subtitle_deleted(self, subtitle_file_path: Path):
+        """处理字幕文件删除：删完全同名文件 + 空目录"""
+        deleted_files = []
+        deleted_dirs = []
+        try:
+            # 获取目标路径（保留完整后缀）
+            storage_type, target_path = self._get_target_path(subtitle_file_path, keep_suffix=True)
+            if not storage_type or not target_path:
+                logger.warning(f"未找到字幕文件 {subtitle_file_path} 的路径映射")
+                return
+
+            logger.info(f"字幕文件删除触发，映射到：[{storage_type}] {target_path}")
+
+            # 查找完全同名的字幕文件
+            subtitle_file = self._find_file_by_full_name(storage_type, target_path)
+            if subtitle_file:
+                if self._delete_storage_file(storage_type, subtitle_file):
+                    deleted_files.append(f"字幕：[{storage_type}] {subtitle_file.path}")
+                    # 清理空目录
+                    dirs = self._delete_empty_storage_dirs(storage_type, subtitle_file)
+                    deleted_dirs.extend(dirs)
+            else:
+                logger.info(f"未找到与字幕文件 {subtitle_file_path} 对应的目标文件")
+
+            # 发送通知
+            if self._notify and (deleted_files or deleted_dirs):
+                notification_lines = [f"✅ 字幕删除触发", f"字幕文件：{subtitle_file_path}"]
+                if deleted_files:
+                    notification_lines.append("删除的文件：")
+                    notification_lines.extend(deleted_files)
+                if deleted_dirs:
+                    notification_lines.append("清理的空目录：")
+                    notification_lines.extend(deleted_dirs)
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="🧹 字幕文件清理",
+                    text="\n".join(notification_lines),
+                )
+        except Exception as e:
+            logger.error(f"处理字幕删除失败：{subtitle_file_path} - {str(e)} - {traceback.format_exc()}")
+
+    def get_page(self) -> List[dict]:
+        return []
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        return []
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        return []
