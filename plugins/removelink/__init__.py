@@ -6,7 +6,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple
@@ -16,12 +16,11 @@ from watchdog.observers.polling import PollingObserver
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import NotificationType, FileItem
+from app.schemas import NotificationType
 from app.core.event import eventmanager
 from app.schemas.types import EventType
 from app.chain.storage import StorageChain
 from app import schemas
-from app.core.config import settings
 
 state_lock = threading.Lock()
 deletion_queue_lock = threading.Lock()
@@ -133,13 +132,10 @@ class FileMonitorHandler(FileSystemEventHandler):
                     logger.info(f"{file_path} 命中过滤关键字 {keyword}，不处理")
                     return
 
-        # 获取文件后缀（转小写）
-        file_ext = file_path.suffix.lower()
-
         # 根据监控类型处理删除事件
         if self.monitor_type == "strm":
             # STRM 监控目录：只处理 strm 文件删除，其他文件忽略
-            if file_ext == ".strm":
+            if file_path.suffix.lower() == ".strm":
                 self.sync.handle_strm_deleted(file_path)
             # 其他文件（如刮削文件）在 STRM 监控目录中被忽略，避免触发硬链接清理
         else:
@@ -198,11 +194,11 @@ class RemoveLink(_PluginBase):
     # 插件名称
     plugin_name = "清理媒体文件"
     # 插件描述
-    plugin_desc = "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能，支持CloudDrive2等多种存储"
+    plugin_desc = "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能"
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.12"
+    plugin_version = "2.11"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -249,10 +245,7 @@ class RemoveLink(_PluginBase):
         ".trickplay",
     ]
 
-    # 视频文件扩展名
-    VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".flv", ".wmv", ".mpeg", ".mpg"]
-
-    # 属性
+    # preivate property
     monitor_dirs = ""
     exclude_dirs = ""
     exclude_keywords = ""
@@ -446,6 +439,13 @@ class RemoveLink(_PluginBase):
     def get_state(self) -> bool:
         return self._enabled
 
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        pass
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        pass
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
             {
@@ -465,7 +465,7 @@ class RemoveLink(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "🧹 媒体文件清理插件",
-                                            "text": "全面的媒体文件清理工具，支持硬链接文件清理和STRM文件清理两种模式，可独立启用。硬链接清理用于监控硬链接文件删除并自动清理相关文件；STRM清理用于监控STRM文件删除并删除对应的网盘文件（支持CloudDrive2等多种存储）。同时支持刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能。",
+                                            "text": "全面的媒体文件清理工具，支持硬链接文件清理和STRM文件清理两种模式，可独立启用。硬链接清理用于监控硬链接文件删除并自动清理相关文件；STRM清理用于监控STRM文件删除并删除对应的网盘文件。同时支持刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能。",
                                         },
                                     }
                                 ],
@@ -769,8 +769,8 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "title": "📺 STRM文件清理配置（支持多存储）",
-                                            "text": "监控STRM文件删除，自动删除网盘上对应的视频文件。支持CloudDrive2等多种存储系统。监控目录会自动从路径映射中获取。",
+                                            "title": "📺 STRM文件清理配置",
+                                            "text": "监控STRM文件删除，自动删除网盘上对应的视频文件。监控目录会自动从路径映射中获取。",
                                         },
                                     }
                                 ],
@@ -808,9 +808,10 @@ class RemoveLink(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "strm_path_mappings",
-                                            "label": "STRM路径映射（支持多存储）",
+                                            "label": "STRM路径映射",
                                             "rows": 4,
-                                            "placeholder": "STRM目录:存储类型:网盘目录，每行一个映射关系\n示例：/mnt/strm:CloudDrive储存:/clouddrive/media\n存储类型支持：local（本地）、CloudDrive储存、alipan、u115、rclone、alist等所有可用存储类型",
+                                            # 修改点1：在 placeholder 中增加 CloudDrive 示例
+                                            "placeholder": "STRM目录:存储类型:网盘目录，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体\n例如：/mnt/strm:CloudDrive储存:/cloud/媒体",
                                         },
                                     }
                                 ],
@@ -830,7 +831,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录，例如 /mnt/strm:CloudDrive储存:/clouddrive/media 表示 /mnt/strm/test.strm 对应CloudDrive储存中以 /clouddrive/media/test 为前缀的视频文件。",
+                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录，例如 /ssd/strm:u115:/media 表示 /ssd/strm/test.strm 对应115网盘中以 /media/test 为前缀的视频文件。",
                                         },
                                     }
                                 ],
@@ -849,7 +850,8 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "text": "支持的存储类型：local（本地存储）、CloudDrive储存、alipan（阿里云盘）、u115（115网盘）、rclone（Rclone挂载）、alist（Alist挂载）等所有已注册的存储系统。",
+                                            # 修改点2：在支持的存储类型列表中增加 "CloudDrive储存（CloudDrive2）"
+                                            "text": "支持的存储类型：local（本地存储）、alipan（阿里云盘）、u115（115网盘）、rclone（Rclone挂载）、alist（Alist挂载）、CloudDrive储存（CloudDrive2）。",
                                         },
                                     }
                                 ],
@@ -910,12 +912,6 @@ class RemoveLink(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        pass
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        pass
-
-    def get_command(self) -> List[Dict[str, Any]]:
         pass
 
     def stop_service(self):
@@ -1493,11 +1489,12 @@ class RemoveLink(_PluginBase):
 
     def _find_storage_media_file(
         self, storage_type: str, base_path: str
-    ) -> Optional[schemas.FileItem]:
+    ) -> schemas.FileItem:
         """
         在网盘中查找以指定路径为前缀的视频文件
-        支持 CloudDrive储存 和其他存储类型
         """
+        from app.core.config import settings
+
         # 获取父目录
         parent_path = str(Path(base_path).parent)
         parent_item = schemas.FileItem(
@@ -1519,13 +1516,13 @@ class RemoveLink(_PluginBase):
 
         # 查找以 base_path 为前缀的视频文件
         base_name = Path(base_path).name
-        logger.info(f"在目录 {parent_path} 中查找以 {base_name} 开头的视频文件")
-        
         for file_item in files:
             if file_item.type == "file" and file_item.name.startswith(base_name):
                 # 检查是否为视频文件
-                file_ext = Path(file_item.name).suffix.lower()
-                if file_ext in self.VIDEO_EXTENSIONS:
+                if (
+                    file_item.extension
+                    and f".{file_item.extension.lower()}" in settings.RMT_MEDIAEXT
+                ):
                     logger.info(
                         f"找到匹配的视频文件: [{storage_type}] {file_item.path}"
                     )
